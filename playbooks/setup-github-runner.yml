@@ -1,0 +1,224 @@
+---
+#==============================================================================
+# GitHub Actions Self-Hosted Runner Setup
+#==============================================================================
+# Installs and configures GitHub Actions runner as a systemd service
+#
+# Prerequisites:
+# - Configure github_org_url in inventory/group_vars/monitoring_hosts/vars.yml
+# - Add vault_github_runner_token to inventory/group_vars/monitoring_hosts/vault.yml
+#
+# To get a runner token:
+#   https://github.com/YOUR_ORG/settings/actions/runners/new
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini playbooks/setup-github-runner.yml
+#   or: ./deploy.sh setup-runner
+#==============================================================================
+
+- name: Setup GitHub Actions Runner
+  hosts: monitoring_hosts
+  become: true
+  gather_facts: true
+
+  vars:
+    runner_user: "{{ monitoring_stack_user | default('monitoring') }}"
+    runner_group: "{{ monitoring_stack_group | default(runner_user) }}"
+    runner_home: "/home/{{ runner_user }}"
+    runner_dir: "{{ runner_home }}/actions-runner"
+    runner_version: "2.329.0"
+    # ARM64 architecture (default for this setup)
+    runner_arch: "arm64"
+    runner_download_url: "https://github.com/actions/runner/releases/download/v{{ runner_version }}/actions-runner-linux-{{ runner_arch }}-{{ runner_version }}.tar.gz"
+    # ARM64 checksum
+    runner_checksum: "56768348b3d643a6a29d4ad71e9bdae0dc0ef1eb01afe0f7a8ee097b039bfaaf"
+    # Extract org name from github_org_url (configured in vars.yml)
+    # Example: "https://github.com/your-org" -> "your-org"
+    github_org_name: "{{ github_org_url | regex_replace('https://github.com/', '') }}"
+
+  tasks:
+    #==========================================================================
+    # Prerequisites
+    #==========================================================================
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - tar
+          - jq
+          - libssl-dev
+          - libicu-dev
+        state: present
+        update_cache: yes
+
+    #==========================================================================
+    # User Setup
+    #==========================================================================
+    - name: Ensure runner user is in docker group
+      ansible.builtin.user:
+        name: "{{ runner_user }}"
+        groups: docker
+        append: yes
+        state: present
+
+    #==========================================================================
+    # Download and Install Runner
+    #==========================================================================
+    - name: Check if runner is already installed
+      ansible.builtin.stat:
+        path: "{{ runner_dir }}/config.sh"
+      register: runner_installed
+
+    - name: Check runner architecture compatibility
+      ansible.builtin.shell: |
+        if [ -f "{{ runner_dir }}/bin/Runner.Listener" ]; then
+          file "{{ runner_dir }}/bin/Runner.Listener" | grep -q "{{ 'ARM aarch64' if ansible_architecture == 'aarch64' else 'x86-64' }}"
+          echo $?
+        else
+          echo "2"
+        fi
+      register: arch_check
+      changed_when: false
+      failed_when: false
+
+    - name: Remove incompatible runner installation
+      ansible.builtin.file:
+        path: "{{ runner_dir }}"
+        state: absent
+      when:
+        - runner_installed.stat.exists
+        - arch_check.stdout != "0"
+
+    - name: Re-check if runner is installed after cleanup
+      ansible.builtin.stat:
+        path: "{{ runner_dir }}/config.sh"
+      register: runner_installed_after_cleanup
+
+    - name: Create runner directory
+      ansible.builtin.file:
+        path: "{{ runner_dir }}"
+        state: directory
+        owner: "{{ runner_user }}"
+        group: "{{ runner_group }}"
+        mode: "0755"
+      when: not runner_installed_after_cleanup.stat.exists
+
+    - name: Download GitHub Actions runner ({{ runner_arch }})
+      ansible.builtin.get_url:
+        url: "{{ runner_download_url }}"
+        dest: "/tmp/actions-runner.tar.gz"
+        checksum: "sha256:{{ runner_checksum }}"
+        mode: "0644"
+      when: not runner_installed_after_cleanup.stat.exists
+
+    - name: Extract runner package
+      ansible.builtin.unarchive:
+        src: "/tmp/actions-runner.tar.gz"
+        dest: "{{ runner_dir }}"
+        remote_src: yes
+        owner: "{{ runner_user }}"
+        group: "{{ runner_group }}"
+      when: not runner_installed_after_cleanup.stat.exists
+
+    - name: Clean up downloaded package
+      ansible.builtin.file:
+        path: "/tmp/actions-runner.tar.gz"
+        state: absent
+      when: not runner_installed_after_cleanup.stat.exists
+
+    #==========================================================================
+    # Configure Runner
+    #==========================================================================
+    - name: Check if runner is already configured
+      ansible.builtin.stat:
+        path: "{{ runner_dir }}/.runner"
+      register: runner_configured
+
+    - name: Configure GitHub Actions runner
+      ansible.builtin.shell: |
+        set -e
+        ./config.sh \
+          --url {{ github_org_url }} \
+          --token {{ vault_github_runner_token }} \
+          --name {{ ansible_hostname }}-runner \
+          --labels self-hosted,Linux,X64,monitoring \
+          --work _work \
+          --unattended
+      args:
+        chdir: "{{ runner_dir }}"
+        executable: /bin/bash
+      become: true
+      become_user: "{{ runner_user }}"
+      when: not runner_configured.stat.exists
+      register: config_result
+      failed_when: config_result.rc != 0
+      # no_log: true  # Temporarily disabled for debugging
+
+    - name: Display configuration result (on failure)
+      ansible.builtin.debug:
+        msg: "{{ config_result.stderr_lines | default([]) }}"
+      when:
+        - not runner_configured.stat.exists
+        - config_result.rc != 0
+
+    #==========================================================================
+    # Install as systemd Service
+    #==========================================================================
+    - name: Check if systemd service is already installed
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service"
+      register: service_installed
+
+    - name: Install runner as systemd service
+      ansible.builtin.shell: |
+        sudo ./svc.sh install {{ runner_user }}
+      args:
+        chdir: "{{ runner_dir }}"
+      when: not service_installed.stat.exists
+      register: svc_install_result
+      failed_when: svc_install_result.rc != 0
+
+    - name: Display service installation result (on failure)
+      ansible.builtin.debug:
+        msg: "{{ svc_install_result.stderr_lines | default([]) }}"
+      when:
+        - not service_installed.stat.exists
+        - svc_install_result.rc != 0
+
+    - name: Start and enable GitHub Actions runner service
+      ansible.builtin.systemd:
+        name: actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    #==========================================================================
+    # Verification
+    #==========================================================================
+    - name: Check runner service status
+      ansible.builtin.systemd:
+        name: actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service
+      register: runner_service
+
+    - name: Display runner setup summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          GitHub Actions Runner Setup Complete
+          ============================================================
+          Runner User: {{ runner_user }}
+          Runner Directory: {{ runner_dir }}
+          Organization: {{ github_org_url }}
+          Runner Name: {{ ansible_hostname }}-runner
+          Labels: self-hosted,Linux,X64,monitoring
+
+          Service Name: actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service
+          Service Status: {{ runner_service.status.ActiveState }}
+
+          To check logs:
+            sudo journalctl -u actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service -f
+
+          To manage service:
+            sudo systemctl status actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service
+            sudo systemctl restart actions.runner.{{ github_org_name }}.{{ ansible_hostname }}-runner.service
+          ============================================================

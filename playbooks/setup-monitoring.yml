@@ -1,0 +1,608 @@
+---
+#==============================================================================
+# Monitoring Stack Setup
+#==============================================================================
+# Complete monitoring stack deployment for Hetzner Cloud
+#
+# Prerequisites:
+# - Target host must have SSH access configured
+# - Ansible control node must have ansible-core >= 2.12
+# - Git repository URL configured in group_vars/monitoring_hosts.yml
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini playbooks/setup-monitoring.yml
+#   or: ./deploy.sh deploy
+#==============================================================================
+
+- name: Deploy Monitoring Stack
+  hosts: monitoring_hosts
+  become: true
+  gather_facts: true
+
+  vars:
+    # User configuration - controlled via inventory/group_vars
+    app_user: "{{ monitoring_stack_user | default('monitoring') }}"
+    app_group: "{{ monitoring_stack_group | default(monitoring_stack_user | default('monitoring')) }}"
+    app_user_groups: "{{ monitoring_stack_user_groups | default(['sudo', 'docker']) }}"
+
+    # Directories
+    project_root: /opt/monitoring
+    releases_dir: "{{ project_root }}/releases"
+    current_release_link: "{{ project_root }}/current"
+    shared_dir: "{{ project_root }}/shared"
+
+    # Volume mount target (where Hetzner volume should be mounted)
+    # If empty, volume auto-detection is disabled
+    volume_mount_target: "{{ monitoring_volume_mount_target | default('/opt/monitoring') }}"
+
+    # Git repository
+    # Use HTTPS for public repos (easier, no SSH keys needed)
+    # Use SSH if you have SSH keys configured: git@github.com:miroljubspasic/docker-monitoring-stack.git
+    monitoring_repo_url: "https://github.com/miroljubspasic/docker-monitoring-stack.git"
+    monitoring_repo_branch: main
+
+    # Git clone optimization
+    git_clone_depth: 1 # Shallow clone (faster)
+    git_clone_timeout: 300 # 5 minutes timeout
+
+    # Release management
+    keep_releases: 3 # Keep last 3 releases
+
+    # Data directories (production layout)
+    data_dirs:
+      - "{{ project_root }}/caddy"
+      - "{{ project_root }}/prometheus"
+      - "{{ project_root }}/registry"
+      - "{{ project_root }}/graylog"
+      - "{{ project_root }}/opensearch"
+
+  tasks:
+    #==========================================================================
+    # System Preparation
+    #==========================================================================
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - git
+          - python3-pip
+          - acl
+        state: present
+
+    #==========================================================================
+    # Docker Installation (Modern method for Ubuntu 22.04+)
+    #==========================================================================
+    # Uses /etc/apt/keyrings/ instead of deprecated apt-key
+    # Reference: https://docs.docker.com/engine/install/ubuntu/
+    #
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /tmp/docker.gpg
+        mode: "0644"
+
+    - name: Convert and install Docker GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor -o /etc/apt/keyrings/docker.gpg < /tmp/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Get system architecture
+      ansible.builtin.command: dpkg --print-architecture
+      register: system_arch
+      changed_when: false
+
+    - name: Remove legacy Docker repository entry without signed-by
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ system_arch.stdout }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: absent
+        filename: docker
+
+    - name: Add Docker repository with signed-by
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ system_arch.stdout }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+
+    - name: Install Docker CE
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install Docker Python SDK
+      ansible.builtin.apt:
+        name:
+          - python3-docker
+        state: present
+
+    #==========================================================================
+    # User Setup
+    #==========================================================================
+    - name: Ensure application group exists
+      ansible.builtin.group:
+        name: "{{ app_group }}"
+        state: present
+
+    - name: Ensure application user exists and has required groups
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        groups: "{{ (app_user_groups | default([])) | join(',') if (app_user_groups | default([])) | length > 0 else omit }}"
+        append: yes
+        shell: /bin/bash
+        state: present
+
+    - name: Allow application user to use sudo without password
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers.d/{{ app_user }}
+        line: "{{ app_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: yes
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: Configure Docker socket permissions
+      ansible.builtin.file:
+        path: /var/run/docker.sock
+        owner: root
+        group: docker
+        mode: "0666"
+
+    - name: Ensure Docker service is running and enabled
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Reset connection to apply group membership changes
+      ansible.builtin.meta: reset_connection
+
+    #==========================================================================
+    # Volume Management (Hetzner Cloud Volumes)
+    #==========================================================================
+    # Automatically detects and remounts Hetzner Cloud volumes from /mnt to volume_mount_target
+    # If no volume is found, volume_mount_target will be created as a regular directory
+    #
+    - name: Find Hetzner Cloud volumes mounted in /mnt
+      ansible.builtin.shell: |
+        mount | grep '/mnt/HC_Volume_' | awk '{print $1, $3}' || true
+      register: hetzner_volumes
+      changed_when: false
+      failed_when: false
+      when: volume_mount_target != ""
+
+    - name: Set volume detection facts
+      ansible.builtin.set_fact:
+        has_hetzner_volume: "{{ hetzner_volumes.stdout_lines | length > 0 if volume_mount_target != '' else false }}"
+        volume_device: "{{ hetzner_volumes.stdout_lines[0].split()[0] if (volume_mount_target != '' and hetzner_volumes.stdout_lines | length > 0) else '' }}"
+        volume_mount: "{{ hetzner_volumes.stdout_lines[0].split()[1] if (volume_mount_target != '' and hetzner_volumes.stdout_lines | length > 0) else '' }}"
+
+    - name: Display volume detection result
+      ansible.builtin.debug:
+        msg: |
+          Volume Management:
+          - Auto-mount enabled: {{ volume_mount_target != '' }}
+          - Target mount path: {{ volume_mount_target if volume_mount_target != '' else 'disabled' }}
+          - Hetzner Volume Found: {{ has_hetzner_volume }}
+          {% if has_hetzner_volume %}
+          - Device: {{ volume_device }}
+          - Current Mount: {{ volume_mount }}
+          - Will remount to: {{ volume_mount_target }}
+          {% elif volume_mount_target != '' %}
+          - No Hetzner volume detected
+          - Will use regular directory: {{ volume_mount_target }}
+          {% endif %}
+
+    - name: Unmount Hetzner volume from /mnt (if exists)
+      ansible.posix.mount:
+        path: "{{ volume_mount }}"
+        state: unmounted
+      when:
+        - volume_mount_target != ""
+        - has_hetzner_volume
+
+    - name: Ensure volume mount target exists
+      ansible.builtin.file:
+        path: "{{ volume_mount_target }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: volume_mount_target != ""
+
+    - name: Mount Hetzner volume to target path (if exists)
+      ansible.posix.mount:
+        path: "{{ volume_mount_target }}"
+        src: "{{ volume_device }}"
+        fstype: ext4
+        opts: defaults,nofail
+        state: mounted
+      when:
+        - volume_mount_target != ""
+        - has_hetzner_volume
+
+    - name: Set ownership on volume mount target
+      ansible.builtin.file:
+        path: "{{ volume_mount_target }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+        recurse: false
+      when: volume_mount_target != ""
+
+    #==========================================================================
+    # Directory Setup
+    #==========================================================================
+
+    - name: Create releases directory
+      ansible.builtin.file:
+        path: "{{ releases_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Create shared directory
+      ansible.builtin.file:
+        path: "{{ shared_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Create data directories for services
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+      loop: "{{ data_dirs }}"
+
+    #==========================================================================
+    # Clone Repository (Rolling Releases Strategy)
+    #==========================================================================
+    - name: Check if Git is installed
+      ansible.builtin.command: git --version
+      register: git_version
+      changed_when: false
+
+    - name: Display Git version
+      ansible.builtin.debug:
+        msg: "Git version: {{ git_version.stdout }}"
+
+    - name: Generate release timestamp
+      ansible.builtin.set_fact:
+        release_timestamp: "{{ ansible_date_time.epoch }}"
+
+    - name: Set release directory path
+      ansible.builtin.set_fact:
+        release_path: "{{ releases_dir }}/{{ release_timestamp }}"
+
+    - name: Clone repository to new release directory
+      ansible.builtin.git:
+        repo: "{{ monitoring_repo_url }}"
+        dest: "{{ release_path }}"
+        version: "{{ monitoring_repo_branch }}"
+        force: yes
+        single_branch: yes
+        depth: "{{ git_clone_depth }}"
+        accept_hostkey: yes
+        umask: "0022"
+      become: true
+      become_user: "{{ app_user }}"
+      register: git_result
+      async: "{{ git_clone_timeout }}"
+      poll: 5
+      retries: 3
+      delay: 10
+      until: git_result is succeeded
+
+    - name: Display Git clone result
+      ansible.builtin.debug:
+        msg: |
+          Git clone completed:
+          - Repository: {{ monitoring_repo_url }}
+          - Branch: {{ monitoring_repo_branch }}
+          - Release: {{ release_timestamp }}
+          - Path: {{ release_path }}
+
+    - name: Find all releases sorted by time
+      ansible.builtin.find:
+        paths: "{{ releases_dir }}"
+        file_type: directory
+        recurse: no
+      register: releases_found
+
+    - name: Sort releases by modification time (newest first)
+      ansible.builtin.set_fact:
+        sorted_releases: "{{ releases_found.files | sort(attribute='mtime', reverse=true) }}"
+
+    - name: Remove old releases (keep last {{ keep_releases }})
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ sorted_releases[keep_releases:] }}"
+      when: sorted_releases | length > keep_releases
+
+    - name: Update 'current' symlink to point to latest release
+      ansible.builtin.file:
+        src: "{{ release_path }}"
+        dest: "{{ current_release_link }}"
+        state: link
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        force: yes
+
+    - name: Display current release info
+      ansible.builtin.debug:
+        msg: |
+          Current release: {{ current_release_link }} -> {{ release_path }}
+          Total releases: {{ sorted_releases | length }}
+          Keeping: {{ keep_releases }} releases
+
+    #==========================================================================
+    # Environment Configuration (Persistent .env from Ansible Vault)
+    #==========================================================================
+    - name: Deploy production .env from vault variables
+      ansible.builtin.template:
+        src: ../templates/production.env.j2
+        dest: "{{ project_root }}/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Create symlink from new release to persistent .env
+      ansible.builtin.file:
+        src: "{{ project_root }}/.env"
+        dest: "{{ release_path }}/.env"
+        state: link
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        force: yes
+
+    #==========================================================================
+    # Setup Default ACL for Data Directories
+    #==========================================================================
+    # Docker containers run with specific UIDs (e.g., prometheus uses 65534, graylog uses 1100).
+    # Using ACL (Access Control Lists) to set default permissions - all new files/dirs
+    # created by Docker will automatically inherit 777 permissions.
+    # This is the "systemski" pristup - postaviš jednom, radi zauvek.
+    #
+    - name: Ensure data parent directories exist with 777 permissions
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0777"
+        recurse: true
+      loop:
+        - "{{ project_root }}/prometheus/data"
+        - "{{ project_root }}/graylog/data"
+        - "{{ project_root }}/graylog/mongodb"
+        - "{{ project_root }}/graylog/datanode"
+        - "{{ project_root }}/opensearch/data"
+
+    - name: Set default ACL on data directories (all new subdirs get 777 automatically)
+      ansible.builtin.shell: |
+        # Set default ACL for new files/directories (d: prefix)
+        setfacl -m d:u::rwx,d:g::rwx,d:o::rwx {{ item }}
+        # Set ACL for existing directory
+        setfacl -m u::rwx,g::rwx,o::rwx {{ item }}
+        # Apply recursively to any existing subdirectories
+        setfacl -R -m d:u::rwx,d:g::rwx,d:o::rwx {{ item }}
+        setfacl -R -m u::rwx,g::rwx,o::rwx {{ item }}
+      loop:
+        - "{{ project_root }}/prometheus/data"
+        - "{{ project_root }}/graylog/data"
+        - "{{ project_root }}/graylog/mongodb"
+        - "{{ project_root }}/graylog/datanode"
+        - "{{ project_root }}/opensearch/data"
+      changed_when: false
+
+    #==========================================================================
+    # Prometheus Configuration
+    #==========================================================================
+    - name: Check if prometheus.yml.example exists
+      ansible.builtin.stat:
+        path: "{{ release_path }}/docker/prometheus/prometheus.yml.example"
+      register: prometheus_example_check
+
+    - name: Check if prometheus.yml already exists
+      ansible.builtin.stat:
+        path: "{{ release_path }}/docker/prometheus/prometheus.yml"
+      register: prometheus_yml_check
+
+    - name: Copy prometheus.yml.example to prometheus.yml
+      ansible.builtin.copy:
+        src: "{{ release_path }}/docker/prometheus/prometheus.yml.example"
+        dest: "{{ release_path }}/docker/prometheus/prometheus.yml"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0644"
+        remote_src: yes
+      when:
+        - prometheus_example_check.stat.exists
+        - not prometheus_yml_check.stat.exists
+
+    #==========================================================================
+    # Docker Registry Authentication (htpasswd)
+    #==========================================================================
+    - name: Install required packages for htpasswd
+      ansible.builtin.apt:
+        name:
+          - apache2-utils
+          - python3-passlib
+        state: present
+
+    - name: Create registry auth directory
+      ansible.builtin.file:
+        path: "{{ project_root }}/registry/auth"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0755"
+
+    - name: Remove old htpasswd file to ensure clean state
+      ansible.builtin.file:
+        path: "{{ project_root }}/registry/auth/htpasswd"
+        state: absent
+      when: registry_users is defined and registry_users | length > 0
+
+    - name: Generate htpasswd file for Docker Registry users
+      community.general.htpasswd:
+        path: "{{ project_root }}/registry/auth/htpasswd"
+        name: "{{ item.username }}"
+        password: "{{ item.password }}"
+        crypt_scheme: bcrypt
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: "0600"
+        create: true
+      loop: "{{ registry_users }}"
+      no_log: true
+      when: registry_users is defined and registry_users | length > 0
+
+    - name: Display deployment configuration info
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Configuration Management:
+          ============================================================
+
+            Environment variables (.env):
+             Location: {{ project_root }}/.env
+             Status: Deployed from Ansible Vault
+             Secrets managed via: group_vars/monitoring_hosts/vault.yml
+             To update: Edit vault file and re-deploy
+
+            Prometheus configuration:
+             Location: {{ current_release_link }}/docker/prometheus/prometheus.yml
+             Action Required:
+             - SSH to server and customize scrape targets
+             - Adjust scrape intervals for your environment
+             - Set up alerting rules if needed
+
+           Configuration Files:
+          - Persistent .env: {{ project_root }}/.env
+          - Symlinked to: {{ current_release_link }}/.env
+          - Vault file: group_vars/monitoring_hosts/vault.yml (encrypted)
+
+           To update secrets:
+             ansible-vault edit group_vars/monitoring_hosts/vault.yml \
+               --vault-password-file .vault_pass
+          ============================================================
+
+    #==========================================================================
+    # Deploy Docker Compose Stack
+    #==========================================================================
+    - name: Deploy monitoring stack with docker compose
+      community.docker.docker_compose_v2:
+        project_src: "{{ current_release_link }}"
+        project_name: monitoring
+        state: present
+        pull: always
+        remove_orphans: true
+      become: true
+      become_user: "{{ app_user }}"
+      register: compose_result
+
+    - name: Wait for services to start
+      ansible.builtin.pause:
+        seconds: 10
+      when: compose_result.changed
+
+    #==========================================================================
+    # Fix Permissions After Docker Creates Subdirectories
+    #==========================================================================
+    # Docker creates subdirectories as root:root 755 when containers first start.
+    # We need to fix permissions recursively AFTER Docker has created them.
+    # ACL default will handle future files, but existing ones need chmod.
+    #
+    - name: Fix permissions on subdirectories created by Docker (recursive 777)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0777"
+        recurse: yes
+      loop:
+        - "{{ project_root }}/prometheus/data"
+        - "{{ project_root }}/graylog/data"
+        - "{{ project_root }}/graylog/mongodb"
+        - "{{ project_root }}/graylog/datanode"
+        - "{{ project_root }}/opensearch/data"
+
+    #==========================================================================
+    # Verification
+    #==========================================================================
+    - name: Check running containers
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      register: container_status
+      loop:
+        - caddy-monitoring
+        - prometheus-monitoring
+        - grafana-monitoring
+        - graylog-monitoring
+      ignore_errors: true
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Monitoring Stack Deployment Complete
+          ============================================================
+          User: {{ app_user }}
+          Project root: {{ project_root }}
+          Current release: {{ current_release_link }} -> {{ release_path }}
+          Persistent .env: {{ project_root }}/.env
+          Compose project: {{ current_release_link }}
+
+          Data directories:
+          {% for dir in data_dirs %}
+          - {{ dir }}
+          {% endfor %}
+
+          Container Status:
+          {% for result in container_status.results %}
+          - {{ result.item }}: {{ 'Running' if result.container.State.Running | default(false) else 'Not Running' }}
+          {% endfor %}
+
+          Releases kept: {{ keep_releases }} (currently: {{ sorted_releases | length }})
+
+          Next Steps:
+          1. Configure required secrets in {{ project_root }}/.env
+          2. Update hostnames for your domain
+          3. Configure DNS records to point to this server
+          4. Run deployment again to apply changes
+          ============================================================

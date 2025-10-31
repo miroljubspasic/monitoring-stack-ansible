@@ -1,0 +1,53 @@
+---
+#==============================================================================
+# Ansible Vault - Encrypted Secrets (PASSWORDS ONLY)
+#==============================================================================
+# This file contains ONLY sensitive passwords and secrets.
+# Public configuration (hostnames, etc.) is in vars.yml
+#
+# To create encrypted version:
+#   ansible-vault create group_vars/monitoring_hosts/vault.yml \
+#     --vault-password-file .vault_pass
+#
+# To edit encrypted file:
+#   ansible-vault edit group_vars/monitoring_hosts/vault.yml \
+#     --vault-password-file .vault_pass
+#
+# Generate passwords using: ./scripts/generate-secrets.sh
+#==============================================================================
+
+# Graylog Configuration
+# Generate with: openssl rand -hex 48
+vault_graylog_password_secret: "CHANGE_ME_96_CHAR_HEX_STRING_GENERATED_BY_SCRIPT"
+
+# Generate with: echo -n "yourpassword" | sha256sum | cut -d" " -f1
+vault_graylog_root_password_sha2: "CHANGE_ME_SHA256_HASH_OF_YOUR_PASSWORD"
+
+# Grafana Configuration
+# Plain text password (min 12 characters)
+vault_grafana_admin_password: "ChangeMeToStrongPassword123"
+
+# Prometheus Configuration
+# Generate with: docker run --rm caddy:alpine caddy hash-password --plaintext 'yourpassword'
+vault_prometheus_admin_password: "$2a$14$CHANGE_ME_BCRYPT_HASH_GENERATED_BY_CADDY"
+
+# OpenSearch Configuration
+# Generate with: LC_ALL=C tr -dc 'A-Za-z0-9_@#%^' < /dev/urandom | head -c32
+vault_opensearch_admin_password: "CHANGE_ME_32_CHAR_RANDOM_STRING"
+
+# GitHub Runner Configuration
+# Get from: https://github.com/YOUR_ORG/settings/actions/runners/new
+# Token lifetime is 60 minutes; generate a fresh token before running setup-runner
+vault_github_runner_token: "CHANGE_ME_GITHUB_RUNNER_REGISTRATION_TOKEN"
+
+# Docker Registry Authentication
+# List of users who can push/pull from the private Docker Registry
+# Plain text passwords (will be hashed automatically with bcrypt)
+registry_users:
+  - username: "deploy"
+    password: "ChangeMeToStrongPassword123"
+  - username: "ci"
+    password: "ChangeMeToStrongPassword456"
+  # Add more users as needed
+
+# NOTE: Hostnames and github_org_url are NOT sensitive and are in vars.yml (unencrypted)

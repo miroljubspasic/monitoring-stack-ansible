@@ -1,0 +1,31 @@
+# Development notes and temporary files
+*.txt
+*.md
+!README.md
+
+# Ansible specific
+*.retry
+.vault_pass
+inventory/hosts.ini
+inventory/group_vars/monitoring_hosts/vars.yml
+inventory/group_vars/monitoring_hosts/vault.yml
+
+# SSH keys (private keys only, allow .pub and README)
+.ssh/*
+!.ssh/README.md
+!.ssh/*.pub
+!.ssh/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

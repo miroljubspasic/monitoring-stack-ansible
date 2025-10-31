@@ -1,0 +1,41 @@
+---
+#==============================================================================
+# Monitoring Stack - Public Variables (Template)
+#==============================================================================
+# These are non-sensitive configuration variables.
+#
+# Usage:
+#   1. Copy this file: cp vars.yml.example vars.yml
+#   2. Edit vars.yml and configure your actual domain names
+#
+# Note: vars.yml is ignored by git (contains your actual domains)
+#==============================================================================
+
+# Production Hostnames (Public DNS Records)
+# Update these to match your actual domain
+vault_registry_hostname: "hub.example.com"
+vault_prometheus_hostname: "prometheus.example.com"
+vault_grafana_hostname: "grafana.example.com"
+vault_graylog_hostname: "graylog.example.com"
+
+# GitHub Runner Configuration
+# Your GitHub organization or user URL
+github_org_url: "https://github.com/your-org"
+
+# System User Configuration
+# User created on the target host for running the monitoring stack
+monitoring_stack_user: "monitoring"
+monitoring_stack_group: "monitoring"
+monitoring_stack_user_groups:
+  - sudo
+  - docker
+
+# Volume Mount Target
+# Where to mount Hetzner Cloud volumes (if they exist)
+# Default: /opt/monitoring
+# Set to empty string "" to disable auto-mounting: monitoring_volume_mount_target: ""
+monitoring_volume_mount_target: "/opt/monitoring"
+
+# Optional: Grafana Settings
+# vault_grafana_admin_user: "admin"
+# vault_grafana_server_root_url: "https://grafana.yourdomain.com"
