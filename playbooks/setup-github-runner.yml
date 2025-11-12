@@ -3,13 +3,16 @@
 # GitHub Actions Self-Hosted Runner Setup
 #==============================================================================
 # Installs and configures GitHub Actions runner as a systemd service
+# Targets: runner_hosts group
 #
 # Prerequisites:
-# - Configure github_org_url in inventory/group_vars/monitoring_hosts/vars.yml
-# - Add vault_github_runner_token to inventory/group_vars/monitoring_hosts/vault.yml
+# - Configure github_org_url in inventory/group_vars/runner_hosts/vars.yml
+# - Add vault_github_runner_token to inventory/group_vars/runner_hosts/vault.yml
+# - Add runner servers to [runner_hosts] group in inventory/hosts.ini
 #
-# To get a runner token:
-#   https://github.com/YOUR_ORG/settings/actions/runners/new
+# To get a runner token (valid for 60 minutes):
+#   Organization: https://github.com/YOUR_ORG/settings/actions/runners/new
+#   Repository: https://github.com/YOUR_ORG/YOUR_REPO/settings/actions/runners/new
 #
 # Usage:
 #   ansible-playbook -i inventory/hosts.ini playbooks/setup-github-runner.yml
@@ -17,13 +20,13 @@
 #==============================================================================
 
 - name: Setup GitHub Actions Runner
-  hosts: monitoring_hosts
+  hosts: runner_hosts
   become: true
   gather_facts: true
 
   vars:
-    runner_user: "{{ monitoring_stack_user | default('monitoring') }}"
-    runner_group: "{{ monitoring_stack_group | default(runner_user) }}"
+    runner_user: "{{ runner_stack_user | default('runner') }}"
+    runner_group: "{{ runner_stack_group | default(runner_user) }}"
     runner_home: "/home/{{ runner_user }}"
     runner_dir: "{{ runner_home }}/actions-runner"
     runner_version: "2.329.0"
@@ -40,6 +43,11 @@
     #==========================================================================
     # Prerequisites
     #==========================================================================
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
     - name: Install required packages
       ansible.builtin.apt:
         name:
@@ -48,18 +56,103 @@
           - jq
           - libssl-dev
           - libicu-dev
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - acl
+        state: present
+
+    #==========================================================================
+    # Docker Installation (Modern method for Ubuntu 22.04+)
+    #==========================================================================
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /tmp/docker.gpg
+        mode: "0644"
+
+    - name: Convert and install Docker GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor -o /etc/apt/keyrings/docker.gpg < /tmp/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Get system architecture
+      ansible.builtin.command: dpkg --print-architecture
+      register: system_arch
+      changed_when: false
+
+    - name: Remove legacy Docker repository entry without signed-by
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ system_arch.stdout }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: absent
+        filename: docker
+
+    - name: Add Docker repository with signed-by
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ system_arch.stdout }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+
+    - name: Install Docker CE
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
         state: present
         update_cache: yes
+
+    - name: Start and enable Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Configure Docker socket permissions
+      ansible.builtin.file:
+        path: /var/run/docker.sock
+        owner: root
+        group: docker
+        mode: "0666"
 
     #==========================================================================
     # User Setup
     #==========================================================================
-    - name: Ensure runner user is in docker group
+    - name: Ensure runner group exists
+      ansible.builtin.group:
+        name: "{{ runner_group }}"
+        state: present
+
+    - name: Ensure runner user exists and has required groups
       ansible.builtin.user:
         name: "{{ runner_user }}"
-        groups: docker
+        group: "{{ runner_group }}"
+        groups: "{{ runner_stack_user_groups | default(['sudo', 'docker']) | join(',') if (runner_stack_user_groups | default(['sudo', 'docker'])) | length > 0 else 'docker' }}"
         append: yes
+        shell: /bin/bash
         state: present
+
+    - name: Allow runner user to use sudo without password
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers.d/{{ runner_user }}
+        line: "{{ runner_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: yes
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: Reset connection to apply group membership changes
+      ansible.builtin.meta: reset_connection
 
     #==========================================================================
     # Download and Install Runner

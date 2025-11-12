@@ -17,6 +17,18 @@ vault_registry_hostname: "hub.example.com"
 vault_prometheus_hostname: "prometheus.example.com"
 vault_grafana_hostname: "grafana.example.com"
 vault_graylog_hostname: "graylog.example.com"
+vault_uptime_kuma_hostname: "uptime.example.com"
+vault_checkmk_hostname: "checkmk.example.com"
+vault_checkmk_site_id: "survey"
+
+# Docker Compose Files Configuration
+# Choose which services to deploy by listing compose files (colon-separated)
+# Comment out or remove services you don't want to deploy
+# Examples:
+#   All services: docker-compose.yaml:docker-compose.checkmk.yaml:docker-compose.uptime-kuma.yaml
+#   Without CheckMK: docker-compose.yaml:docker-compose.uptime-kuma.yaml
+#   Core only: docker-compose.yaml
+vault_compose_file: "docker-compose.yaml:docker-compose.checkmk.yaml:docker-compose.uptime-kuma.yaml"
 
 # GitHub Runner Configuration
 # Your GitHub organization or user URL

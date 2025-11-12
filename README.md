@@ -265,37 +265,59 @@ docker compose logs -f
 
 ## GitHub Actions Runner Setup (Optional)
 
-To add a self-hosted GitHub Actions runner to your monitoring VM:
+Deploy self-hosted GitHub Actions runners on **dedicated servers** (separate from monitoring stack).
 
-### 1. Configure GitHub Organization
-Edit `inventory/group_vars/monitoring_hosts/vars.yml`:
-```yaml
-github_org_url: "https://github.com/your-org"
-```
+### Overview
 
-### 2. Get Runner Token
-1. Go to: `https://github.com/YOUR_ORG/settings/actions/runners/new`
-2. Copy the registration token
+Runners are deployed to the `runner_hosts` inventory group with their own configuration:
+- **Inventory group:** `[runner_hosts]` in `inventory/hosts.ini`
+- **Configuration:** `inventory/group_vars/runner_hosts/`
+- **Playbook:** `playbooks/setup-github-runner.yml`
+- **Documentation:** See [RUNNER_SETUP.md](RUNNER_SETUP.md) for detailed guide
 
-### 3. Add Token to Vault
-```bash
-ansible-vault edit inventory/group_vars/monitoring_hosts/vault.yml \
-  --vault-password-file .vault_pass
-```
+### Quick Setup
 
-Add:
-```yaml
-vault_github_runner_token: "YOUR_REGISTRATION_TOKEN"
-```
+1. **Add server to inventory** (`inventory/hosts.ini`):
+   ```ini
+   [runner_hosts]
+   giz-runner ansible_host=159.69.41.252 ansible_user=root
+   ```
 
-> The GitHub registration token expires 60 minutes after it is generated. Run `./deploy.sh setup-runner` before it expires, or generate a fresh token if the command fails with an authentication error.
+2. **Configure variables:**
+   ```bash
+   cp inventory/group_vars/runner_hosts/vars.yml.example \
+      inventory/group_vars/runner_hosts/vars.yml
+   vim inventory/group_vars/runner_hosts/vars.yml
+   ```
 
-### 4. Deploy Runner
-```bash
-./deploy.sh setup-runner
-```
+   Set:
+   ```yaml
+   github_org_url: "https://github.com/your-org"
+   ```
 
-The runner will appear in your GitHub organization's settings.
+3. **Get GitHub runner token** (valid 60 minutes):
+   - Organization: `https://github.com/YOUR_ORG/settings/actions/runners/new`
+   - Repository: `https://github.com/YOUR_ORG/YOUR_REPO/settings/actions/runners/new`
+
+4. **Create encrypted vault:**
+   ```bash
+   ansible-vault create inventory/group_vars/runner_hosts/vault.yml \
+     --vault-password-file .vault_pass
+   ```
+
+   Add token:
+   ```yaml
+   vault_github_runner_token: "YOUR_REGISTRATION_TOKEN"
+   ```
+
+5. **Deploy runner:**
+   ```bash
+   ./deploy.sh setup-runner
+   ```
+
+The runner will appear in your GitHub organization's settings as `{hostname}-runner`.
+
+📖 **Full documentation:** [RUNNER_SETUP.md](RUNNER_SETUP.md)
 
 ## Project Structure
 
@@ -310,15 +332,18 @@ The runner will appear in your GitHub organization's settings.
 |   |-- hosts.ini                 # Server inventory (git-ignored)
 |   |-- hosts.ini.example         # Template for hosts
 |   \-- group_vars/
-|       \-- monitoring_hosts/
-|           |-- vars.yml          # Public config (git-ignored)
-|           |-- vars.yml.example  # Template for variables
-|           |-- vault.yml         # Encrypted secrets (git-ignored)
-|           \-- vault.yml.example # Template for vault
+|       |-- monitoring_hosts/     # Monitoring stack config
+|       |   |-- vars.yml          # Public config (git-ignored)
+|       |   |-- vars.yml.example  # Template
+|       |   |-- vault.yml         # Encrypted secrets (git-ignored)
+|       |   \-- vault.yml.example # Template
+|       \-- runner_hosts/         # GitHub runner config
+|           |-- vars.yml.example  # Template
+|           \-- vault.yml.example # Template
 |
 |-- playbooks/
-|   |-- setup-monitoring.yml      # Main deployment playbook
-|   \-- setup-github-runner.yml   # GitHub runner setup
+|   |-- setup-monitoring.yml      # Monitoring stack deployment (targets: monitoring_hosts)
+|   \-- setup-github-runner.yml   # GitHub runner setup (targets: runner_hosts)
 |
 |-- templates/
 |   \-- production.env.j2         # Docker Compose environment template
@@ -328,6 +353,7 @@ The runner will appear in your GitHub organization's settings.
 |
 |-- deploy.sh                      # Main deployment script
 |-- requirements.yml               # Ansible Galaxy dependencies
+|-- RUNNER_SETUP.md                # GitHub runner detailed guide
 \-- .vault_pass                    # Vault password (git-ignored)
 ```
 

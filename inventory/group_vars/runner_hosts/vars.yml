@@ -1,0 +1,10 @@
+---
+# GitHub Runner Configuration
+github_org_url: "https://github.com/actserbia"
+
+# System User Configuration
+monitoring_stack_user: "monitoring"
+monitoring_stack_group: "monitoring"
+monitoring_stack_user_groups:
+  - sudo
+  - docker

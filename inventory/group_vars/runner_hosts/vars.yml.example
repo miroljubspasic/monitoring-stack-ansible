@@ -1,0 +1,32 @@
+---
+#==============================================================================
+# GitHub Runner Hosts - Public Variables (Template)
+#==============================================================================
+# These are non-sensitive configuration variables for GitHub runner servers.
+#
+# Usage:
+#   1. Copy this file: cp vars.yml.example vars.yml
+#   2. Edit vars.yml and configure your actual settings
+#
+# Note: vars.yml is ignored by git (contains your actual configuration)
+#==============================================================================
+
+# GitHub Organization/Repository Configuration
+# Your GitHub organization or user URL
+# Examples:
+#   - Organization: https://github.com/your-org
+#   - User/Personal: https://github.com/your-username
+github_org_url: "https://github.com/your-org"
+
+# Runner User Configuration
+# User created on the target host for running the GitHub Actions runner
+runner_stack_user: "runner"
+runner_stack_group: "runner"
+runner_stack_user_groups:
+  - sudo
+  - docker
+
+# Optional: Runner Configuration
+# runner_version: "2.329.0"  # Override default runner version
+# runner_arch: "arm64"       # arm64 or x64 (auto-detected by default)
+# runner_labels: "self-hosted,Linux,X64,custom-label"  # Custom runner labels

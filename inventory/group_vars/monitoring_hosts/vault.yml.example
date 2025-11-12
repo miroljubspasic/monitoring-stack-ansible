@@ -50,4 +50,16 @@ registry_users:
     password: "ChangeMeToStrongPassword456"
   # Add more users as needed
 
+# CheckMK Configuration
+# Plain text password (min 8 characters)
+vault_checkmk_admin_password: "ChangeMeToStrongPassword789"
+
+# Email Configuration for CheckMK Notifications
+# For Gmail, use App Password instead of regular password
+# Generate at: https://myaccount.google.com/apppasswords
+vault_mail_from: "checkmk@yourdomain.com"
+vault_notification_email: "admin@yourdomain.com"
+vault_mail_username: "your-email@gmail.com"
+vault_mail_password: "CHANGE_ME_GMAIL_APP_PASSWORD"
+
 # NOTE: Hostnames and github_org_url are NOT sensitive and are in vars.yml (unencrypted)

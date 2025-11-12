@@ -55,6 +55,8 @@
       - "{{ project_root }}/registry"
       - "{{ project_root }}/graylog"
       - "{{ project_root }}/opensearch"
+      - "{{ project_root }}/uptime-kuma"
+      - "{{ project_root }}/checkmk"
 
   tasks:
     #==========================================================================

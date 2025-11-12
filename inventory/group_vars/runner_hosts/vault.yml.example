@@ -1,0 +1,26 @@
+---
+#==============================================================================
+# GitHub Runner Hosts - Ansible Vault (SECRETS ONLY)
+#==============================================================================
+# This file contains ONLY sensitive secrets for GitHub runner configuration.
+# Public configuration (github_org_url, etc.) is in vars.yml
+#
+# To create encrypted version:
+#   ansible-vault create inventory/group_vars/runner_hosts/vault.yml \
+#     --vault-password-file .vault_pass
+#
+# To edit encrypted file:
+#   ansible-vault edit inventory/group_vars/runner_hosts/vault.yml \
+#     --vault-password-file .vault_pass
+#==============================================================================
+
+# GitHub Runner Registration Token
+# Get a fresh token from:
+#   - Organization: https://github.com/YOUR_ORG/settings/actions/runners/new
+#   - Repository: https://github.com/YOUR_ORG/YOUR_REPO/settings/actions/runners/new
+#
+# IMPORTANT: Token lifetime is 60 minutes!
+# Generate a fresh token immediately before running setup-github-runner playbook
+vault_github_runner_token: "CHANGE_ME_GITHUB_RUNNER_REGISTRATION_TOKEN"
+
+# NOTE: github_org_url and other non-sensitive configs are in vars.yml (unencrypted)
